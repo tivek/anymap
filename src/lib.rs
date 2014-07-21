@@ -179,6 +179,104 @@ impl Mutable for AnyMap {
     }
 }
 
+
+/// ConcurrentAnyMap is a variant of AnyMap which can be shared
+/// between concurrent tasks by using read-only references like eg.
+/// std::sync::Arc. This is achieved by guaranteeing that stored
+/// values have Share and Send traits. Similar to the AnyMap,
+/// convenient and type-safe access is provided for one stored
+/// value per type.
+///
+/// ```rust
+/// # use anymap::ConcurrentAnyMap;
+/// use std::sync::Arc;
+///
+/// let mut data = ConcurrentAnyMap::new();
+/// data.insert(42i);
+///
+/// #[deriving(PartialEq, Show)]
+/// struct Foo {
+///     str: String,
+/// }
+///
+/// data.insert(Foo { str: "foo".to_string() });
+/// let shared_data = Arc::new(data);
+/// for _ in range(0u, 10) {
+///     let child_data = shared_data.clone();
+///     spawn(proc() {
+///         let local_n = child_data.find::<int>()
+///         // Do stuff with the read-only reference
+///         // ...
+///     });
+/// }
+/// ```
+///
+/// Values containing non-static references are not permitted.
+pub struct ConcurrentAnyMap {
+    data: HashMap<TypeId, Box<Any + Send + Share>, TypeIdHasher>,
+}
+
+impl ConcurrentAnyMap {
+    /// Construct a new `ConcurrentAnyMap`.
+    pub fn new() -> ConcurrentAnyMap {
+        ConcurrentAnyMap {
+            data: HashMap::with_hasher(TypeIdHasher),
+        }
+    }
+}
+
+impl ConcurrentAnyMap {
+    /// Retrieve the value stored in the map for the type `T`, if it exists.
+    pub fn find<'a, T: 'static>(&'a self) -> Option<&'a T> {
+        self.data.find(&TypeId::of::<T>()).map(|any| unsafe { any.as_ref_unchecked::<T>() })
+    }
+
+    /// Retrieve a mutable reference to the value stored in the map for the type `T`, if it exists.
+    pub fn find_mut<'a, T: 'static>(&'a mut self) -> Option<&'a mut T> {
+        self.data.find_mut(&TypeId::of::<T>()).map(|any| unsafe { any.as_mut_unchecked::<T>() })
+    }
+    
+    pub fn find_or_insert_with<'a, T: 'static + Send + Share>(&'a mut self, f: || -> T) -> &'a mut T {
+        let newf = |k: &TypeId| -> Box<Any + Send + Share> { box f() as Box<Any + Send + Share> };
+        unsafe {self.data.find_or_insert_with(TypeId::of::<T>(), newf).as_mut_unchecked::<T>() }
+    }
+
+    /// Set the value contained in the map for the type `T`.
+    /// This will override any previous value stored.
+    pub fn insert<T: 'static + Send + Share>(&mut self, value: T) {
+        self.data.insert(TypeId::of::<T>(), box value as Box<Any + Send + Share>);
+    }
+    
+    /// Set the value contained in the map for the type `T`.
+    /// This will override any previous value stored.
+    pub fn insert_with<T: 'static + Send + Share>(&mut self, f: || -> T) {
+        self.data.insert(TypeId::of::<T>(), box f() as Box<Any + Send + Share>);
+    }
+    
+    /// Remove the value for the type `T` if it existed.
+    pub fn remove<T: 'static>(&mut self) {
+        self.data.remove(&TypeId::of::<T>());
+    }
+}
+
+impl Collection for ConcurrentAnyMap {
+    fn len(&self) -> uint {
+        self.data.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+impl Mutable for ConcurrentAnyMap {
+    fn clear(&mut self) {
+        self.data.clear();
+    }
+}
+
+
+
 #[bench]
 fn bench_insertion(b: &mut ::test::Bencher) {
     b.iter(|| {
